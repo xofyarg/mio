@@ -16,7 +16,7 @@
 use std::cmp::min;
 use std::io;
 #[cfg(all(feature = "net", debug_assertions))]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -45,6 +45,8 @@ pub(crate) struct Selector {
     id: usize,
     /// Subscriptions (reads events) we're interested in.
     subscriptions: Arc<Mutex<Vec<wasi::Subscription>>>,
+    #[cfg(debug_assertions)]
+    has_waker: AtomicBool,
 }
 
 impl Selector {
@@ -53,6 +55,8 @@ impl Selector {
             #[cfg(all(debug_assertions, feature = "net"))]
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             subscriptions: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(debug_assertions)]
+            has_waker: AtomicBool::new(false),
         })
     }
 
@@ -62,6 +66,11 @@ impl Selector {
     }
 
     pub(crate) fn select(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<()> {
+        // check for fast path first
+        if waker::fast_wake_awake() {
+            return Ok(());
+        }
+
         events.clear();
 
         let mut subscriptions = self.subscriptions.lock().unwrap();
@@ -121,6 +130,8 @@ impl Selector {
             #[cfg(all(debug_assertions, feature = "net"))]
             id: self.id,
             subscriptions: self.subscriptions.clone(),
+            #[cfg(debug_assertions)]
+            has_waker: AtomicBool::new(self.has_waker.load(Ordering::Acquire)),
         })
     }
 
@@ -203,6 +214,11 @@ impl Selector {
         }
 
         ret
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn register_waker(&self) -> bool {
+        self.has_waker.swap(true, Ordering::AcqRel)
     }
 }
 
@@ -349,6 +365,11 @@ pub(crate) mod event {
 }
 
 cfg_os_poll! {
+    cfg_os_ext! {
+        mod waker;
+        pub(crate) use self::waker::{init_waker, Waker};
+    }
+
     cfg_io_source! {
         pub(crate) struct IoSourceState;
 
